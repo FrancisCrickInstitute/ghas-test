@@ -1,0 +1,129 @@
+name: New GitHub Advanced Security Alerts to Slack
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # every 24 hrs
+  workflow_dispatch:
+
+jobs:
+  scan-alerts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore previous alert cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: security-alert-cache
+
+      - name: Create cache directory
+        run: mkdir -p .cache
+
+      - name: Fetch current alerts
+        env:
+          ORG: FrancisCrickInstitute
+          GH_TOKEN: ${{ secrets.ghas_token }}
+        run: |
+          echo "Fetching open Code Scanning alerts..."
+          curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/orgs/${ORG}/code-scanning/alerts?state=open&per_page=100" \
+               | jq -r '.[] | "\(.id) \(.repository.name)"' > .cache/code_ids.txt
+
+          echo "Fetching open Secret Scanning alerts..."
+          curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/orgs/${ORG}/secret-scanning/alerts?state=open&per_page=100" \
+               | jq -r '.[] | "\(.number) \(.repository.name)"' > .cache/secret_ids.txt
+
+      - name: Compare with previous run
+        id: diff
+        run: |
+          touch .cache/code_ids_prev.txt .cache/secret_ids_prev.txt
+
+          NEW_CODE=$(comm -23 <(sort .cache/code_ids.txt) <(sort .cache/code_ids_prev.txt))
+          NEW_SECRET=$(comm -23 <(sort .cache/secret_ids.txt) <(sort .cache/secret_ids_prev.txt))
+
+          echo "$NEW_CODE" > .cache/new_code.txt
+          echo "$NEW_SECRET" > .cache/new_secret.txt
+
+          TOTAL_NEW=$(( $(echo "$NEW_CODE" | grep -c . || echo 0) + $(echo "$NEW_SECRET" | grep -c . || echo 0) ))
+          echo "total=$TOTAL_NEW" >> $GITHUB_OUTPUT
+
+      - name: Send formatted Slack message
+        if: steps.diff.outputs.total != '0'
+        env:
+          GH_TOKEN: ${{ secrets.ghas_token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          ORG: FrancisCrickInstitute
+        run: |
+          build_block () {
+            COLOR=$1
+            TITLE=$2
+            TEXT=$3
+            echo "{\"type\": \"section\", \"text\": {\"type\": \"mrkdwn\", \"text\": \"*${TITLE}*\n${TEXT}\"}}, {\"type\": \"divider\"}"
+          }
+
+          CODE_BLOCKS=""
+          while read -r LINE; do
+            [ -z "$LINE" ] && continue
+            ID=$(echo "$LINE" | awk '{print $1}')
+            REPO=$(echo "$LINE" | awk '{print $2}')
+            ALERT=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                 "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts/${ID}")
+            RULE=$(echo "$ALERT" | jq -r '.rule.name')
+            SEV=$(echo "$ALERT" | jq -r '.rule.severity')
+            URL=$(echo "$ALERT" | jq -r '.html_url')
+
+            case "$SEV" in
+              error) COLOR="🔴 *High*";;
+              warning) COLOR="🟠 *Medium*";;
+              note) COLOR="🟢 *Low*";;
+              *) COLOR="⚪ Unknown";;
+            esac
+
+            CODE_BLOCKS="${CODE_BLOCKS}\n• *${REPO}* — ${RULE} (${COLOR}) <${URL}|View>"
+          done < .cache/new_code.txt
+
+          SECRET_BLOCKS=""
+          while read -r LINE; do
+            [ -z "$LINE" ] && continue
+            ID=$(echo "$LINE" | awk '{print $1}')
+            REPO=$(echo "$LINE" | awk '{print $2}')
+            ALERT=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                 "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts/${ID}")
+            TYPE=$(echo "$ALERT" | jq -r '.secret_type_display_name')
+            URL=$(echo "$ALERT" | jq -r '.html_url')
+            SECRET_BLOCKS="${SECRET_BLOCKS}\n• *${REPO}* — ${TYPE} <${URL}|View>"
+          done < .cache/new_secret.txt
+
+          BLOCKS="[ {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"🚨 New GitHub Security Alerts Detected\"}},"
+
+          if [ -n "$CODE_BLOCKS" ]; then
+            BLOCKS="${BLOCKS}$(build_block \"#FF0000\" \"🧪 Code Scanning Alerts\" \"$CODE_BLOCKS\")"
+          fi
+
+          if [ -n "$SECRET_BLOCKS" ]; then
+            BLOCKS="${BLOCKS}$(build_block \"#FFA500\" \"🔐 Secret Scanning Alerts\" \"$SECRET_BLOCKS\")"
+          fi
+
+          # Remove trailing comma
+          BLOCKS="${BLOCKS%?}]"
+
+          PAYLOAD="{\"blocks\": ${BLOCKS}}"
+
+          echo "$PAYLOAD" | jq .  # print formatted JSON for debugging
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Save current IDs
+        if: always()
+        run: |
+          mv .cache/code_ids.txt .cache/code_ids_prev.txt
+          mv .cache/secret_ids.txt .cache/secret_ids_prev.txt

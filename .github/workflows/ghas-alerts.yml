@@ -2,49 +2,66 @@ name: New GitHub Advanced Security Alerts to Slack
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # every 24 hrs
+    - cron: "0 0 * * *"  # Every 24 hour
   workflow_dispatch:
 
 jobs:
-  scan-alerts:
+  org-security-alerts:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create cache directory
+        run: mkdir -p .cache
+
       - name: Restore previous alert cache
-        id: cache
         uses: actions/cache@v4
         with:
           path: .cache
           key: security-alert-cache
 
-      - name: Create cache directory
-        run: mkdir -p .cache
+      - name: Fetch current Code Scanning alerts for all repos
+        env:
+          ORG: FrancisCrickInstitute
+          GH_TOKEN: ${{ secrets.ghas_token}}
+        run: |
+          echo "Fetching all repos in the org..."
+          REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/orgs/${ORG}/repos?per_page=100" \
+            | jq -r '.[].name')
 
-  - name: Fetch current Code Scanning alerts
+          echo "" > .cache/code_ids.txt
+
+          for REPO in $REPOS; do
+            ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                     -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100")
+            echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' >> .cache/code_ids.txt
+          done
+
+          touch .cache/code_ids.txt
+
+      - name: Fetch current Secret Scanning alerts for all repos
         env:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
         run: |
-          echo "Fetching open Code Scanning alerts..."
-          curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-               -H "Accept: application/vnd.github+json" \
-               "https://api.github.com/orgs/${ORG}/code-scanning/alerts?state=open&per_page=100" \
-          | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' > .cache/code_ids.txt
-          touch .cache/code_ids.txt   # ensure file exists even if empty
+          echo "Fetching all repos in the org..."
+          REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/orgs/${ORG}/repos?per_page=100" \
+            | jq -r '.[].name')
 
-      - name: Fetch current Secret Scanning alerts
-        env:
-          ORG: FrancisCrickInstitute
-          GH_TOKEN: ${{ secrets.ghas_token }}
-        run: |
-          echo "Fetching open Secret Scanning alerts..."
-          curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-               -H "Accept: application/vnd.github+json" \
-               "https://api.github.com/orgs/${ORG}/secret-scanning/alerts?state=open&per_page=100" \
-          | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' > .cache/secret_ids.txt
+          echo "" > .cache/secret_ids.txt
+
+          for REPO in $REPOS; do
+            ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                     -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100")
+            echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' >> .cache/secret_ids.txt
+          done
+
           touch .cache/secret_ids.txt
 
       - name: Compare with previous run
@@ -61,7 +78,7 @@ jobs:
           TOTAL_NEW=$(( $(echo "$NEW_CODE" | grep -c . || echo 0) + $(echo "$NEW_SECRET" | grep -c . || echo 0) ))
           echo "total=$TOTAL_NEW" >> $GITHUB_OUTPUT
 
-      - name: Send formatted Slack message
+      - name: Send new alerts to Slack
         if: steps.diff.outputs.total != '0'
         env:
           GH_TOKEN: ${{ secrets.ghas_token }}
@@ -69,9 +86,8 @@ jobs:
           ORG: FrancisCrickInstitute
         run: |
           build_block () {
-            COLOR=$1
-            TITLE=$2
-            TEXT=$3
+            TITLE=$1
+            TEXT=$2
             echo "{\"type\": \"section\", \"text\": {\"type\": \"mrkdwn\", \"text\": \"*${TITLE}*\n${TEXT}\"}}, {\"type\": \"divider\"}"
           }
 
@@ -111,26 +127,15 @@ jobs:
           BLOCKS="[ {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"🚨 New GitHub Security Alerts Detected\"}},"
 
           if [ -n "$CODE_BLOCKS" ]; then
-            BLOCKS="${BLOCKS}$(build_block \"#FF0000\" \"🧪 Code Scanning Alerts\" \"$CODE_BLOCKS\")"
+            BLOCKS="${BLOCKS}$(build_block \"🧪 Code Scanning Alerts\" \"$CODE_BLOCKS\")"
           fi
 
           if [ -n "$SECRET_BLOCKS" ]; then
-            BLOCKS="${BLOCKS}$(build_block \"#FFA500\" \"🔐 Secret Scanning Alerts\" \"$SECRET_BLOCKS\")"
+            BLOCKS="${BLOCKS}$(build_block \"🔐 Secret Scanning Alerts\" \"$SECRET_BLOCKS\")"
           fi
 
-          # Remove trailing comma
-          BLOCKS="${BLOCKS%?}]"
+          BLOCKS="${BLOCKS%,}]"  # remove trailing comma
 
           PAYLOAD="{\"blocks\": ${BLOCKS}}"
 
-          echo "$PAYLOAD" | jq .  # print formatted JSON for debugging
-
-          curl -X POST -H 'Content-type: application/json' \
-            --data "$PAYLOAD" \
-            "$SLACK_WEBHOOK_URL"
-
-      - name: Save current IDs
-        if: always()
-        run: |
-          [ -f .cache/code_ids.txt ] && mv .cache/code_ids.txt .cache/code_ids_prev.txt
-          [ -f .cache/secret_ids.txt ] && mv .cache/secret_ids.txt .cache/secret_ids_prev.txt
+          curl -X POST -H 'Content-type:

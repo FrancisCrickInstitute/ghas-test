@@ -23,7 +23,7 @@ jobs:
       - name: Create cache directory
         run: mkdir -p .cache
 
-      - name: Fetch current alerts
+  - name: Fetch current Code Scanning alerts
         env:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
@@ -32,13 +32,20 @@ jobs:
           curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
                -H "Accept: application/vnd.github+json" \
                "https://api.github.com/orgs/${ORG}/code-scanning/alerts?state=open&per_page=100" \
-               | jq -r '.[] | "\(.id) \(.repository.name)"' > .cache/code_ids.txt
+          | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' > .cache/code_ids.txt
+          touch .cache/code_ids.txt   # ensure file exists even if empty
 
+      - name: Fetch current Secret Scanning alerts
+        env:
+          ORG: FrancisCrickInstitute
+          GH_TOKEN: ${{ secrets.ghas_token }}
+        run: |
           echo "Fetching open Secret Scanning alerts..."
           curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
                -H "Accept: application/vnd.github+json" \
                "https://api.github.com/orgs/${ORG}/secret-scanning/alerts?state=open&per_page=100" \
-               | jq -r '.[] | "\(.number) \(.repository.name)"' > .cache/secret_ids.txt
+          | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' > .cache/secret_ids.txt
+          touch .cache/secret_ids.txt
 
       - name: Compare with previous run
         id: diff
@@ -125,5 +132,5 @@ jobs:
       - name: Save current IDs
         if: always()
         run: |
-          mv .cache/code_ids.txt .cache/code_ids_prev.txt
-          mv .cache/secret_ids.txt .cache/secret_ids_prev.txt
+          [ -f .cache/code_ids.txt ] && mv .cache/code_ids.txt .cache/code_ids_prev.txt
+          [ -f .cache/secret_ids.txt ] && mv .cache/secret_ids.txt .cache/secret_ids_prev.txt

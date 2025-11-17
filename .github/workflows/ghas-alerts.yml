@@ -2,7 +2,7 @@ name: New GitHub Advanced Security Alerts to Slack
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # Every 24 hour
+    - cron: "0 0 * * *"  # Every 24 hours
   workflow_dispatch:
 
 jobs:
@@ -22,25 +22,41 @@ jobs:
           path: .cache
           key: security-alert-cache
 
+      - name: Fetch all repos in the org (paginated)
+        env:
+          ORG: FrancisCrickInstitute
+          GH_TOKEN: ${{ secrets.ghas_token }}
+        run: |
+          echo "Fetching all repos in the org with pagination..."
+          REPOS=""
+          PAGE=1
+          while :; do
+            PAGE_REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/orgs/${ORG}/repos?per_page=100&page=${PAGE}" \
+              | jq -r '.[].name')
+            [ -z "$PAGE_REPOS" ] && break
+            REPOS="${REPOS} ${PAGE_REPOS}"
+            PAGE=$((PAGE + 1))
+          done
+          echo "$REPOS" > .cache/repos.txt
+
       - name: Fetch current Code Scanning alerts for all repos
         env:
           ORG: FrancisCrickInstitute
-          GH_TOKEN: ${{ secrets.ghas_token}}
+          GH_TOKEN: ${{ secrets.ghas_token }}
         run: |
-          echo "Fetching all repos in the org..."
-          REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/orgs/${ORG}/repos?per_page=100" \
-            | jq -r '.[].name')
-
           echo "" > .cache/code_ids.txt
-
-          for REPO in $REPOS; do
-            ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-                     -H "Accept: application/vnd.github+json" \
-                     "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100")
-            echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' >> .cache/code_ids.txt
-          done
-
+          while read -r REPO; do
+            PAGE=1
+            while :; do
+              ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "Accept: application/vnd.github+json" \
+                      "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100&page=${PAGE}")
+              [ "$ALERTS" = "[]" ] && break
+              echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' >> .cache/code_ids.txt
+              PAGE=$((PAGE + 1))
+            done
+          done < .cache/repos.txt
           touch .cache/code_ids.txt
 
       - name: Fetch current Secret Scanning alerts for all repos
@@ -48,20 +64,18 @@ jobs:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
         run: |
-          echo "Fetching all repos in the org..."
-          REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/orgs/${ORG}/repos?per_page=100" \
-            | jq -r '.[].name')
-
           echo "" > .cache/secret_ids.txt
-
-          for REPO in $REPOS; do
-            ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-                     -H "Accept: application/vnd.github+json" \
-                     "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100")
-            echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' >> .cache/secret_ids.txt
-          done
-
+          while read -r REPO; do
+            PAGE=1
+            while :; do
+              ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "Accept: application/vnd.github+json" \
+                      "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100&page=${PAGE}")
+              [ "$ALERTS" = "[]" ] && break
+              echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' >> .cache/secret_ids.txt
+              PAGE=$((PAGE + 1))
+            done
+          done < .cache/repos.txt
           touch .cache/secret_ids.txt
 
       - name: Compare with previous run
@@ -75,7 +89,9 @@ jobs:
           echo "$NEW_CODE" > .cache/new_code.txt
           echo "$NEW_SECRET" > .cache/new_secret.txt
 
-          TOTAL_NEW=$(( $(echo "$NEW_CODE" | grep -c . || echo 0) + $(echo "$NEW_SECRET" | grep -c . || echo 0) ))
+          CODE_COUNT=$(echo "$NEW_CODE" | grep -c . || echo 0)
+          SECRET_COUNT=$(echo "$NEW_SECRET" | grep -c . || echo 0)
+          TOTAL_NEW=$(( CODE_COUNT + SECRET_COUNT ))
           echo "total=$TOTAL_NEW" >> $GITHUB_OUTPUT
 
       - name: Send new alerts to Slack
@@ -124,19 +140,19 @@ jobs:
             SECRET_BLOCKS="${SECRET_BLOCKS}\n• *${REPO}* — ${TYPE} <${URL}|View>"
           done < .cache/new_secret.txt
 
-          BLOCKS="[ {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"🚨 New GitHub Security Alerts Detected\"}},"
+          BLOCKS_ARRAY=()
 
-          if [ -n "$CODE_BLOCKS" ]; then
-            BLOCKS="${BLOCKS}$(build_block \"🧪 Code Scanning Alerts\" \"$CODE_BLOCKS\")"
-          fi
+          [ -n "$CODE_BLOCKS" ] && BLOCKS_ARRAY+=("$(build_block \"Code Scanning Alerts\" \"$CODE_BLOCKS\")")
+          [ -n "$SECRET_BLOCKS" ] && BLOCKS_ARRAY+=("$(build_block \"Secret Scanning Alerts\" \"$SECRET_BLOCKS\")")
 
-          if [ -n "$SECRET_BLOCKS" ]; then
-            BLOCKS="${BLOCKS}$(build_block \"🔐 Secret Scanning Alerts\" \"$SECRET_BLOCKS\")"
-          fi
-
-          BLOCKS="${BLOCKS%,}]"  # remove trailing comma
-
-          PAYLOAD="{\"blocks\": ${BLOCKS}}"
+          HEADER="{\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"New GitHub Security Alert Detected\"}}"
+          BLOCKS_JSON=$(IFS=, ; echo "${BLOCKS_ARRAY[*]}")
+          PAYLOAD="{\"blocks\": [${HEADER}, ${BLOCKS_JSON}]}"
 
           curl -X POST -H 'Content-type: application/json' \
             -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+
+      - name: Update previous alert cache
+        run: |
+          cp .cache/code_ids.txt .cache/code_ids_prev.txt
+          cp .cache/secret_ids.txt .cache/secret_ids_prev.txt

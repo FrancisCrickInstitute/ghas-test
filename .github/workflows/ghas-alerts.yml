@@ -138,5 +138,5 @@ jobs:
 
           PAYLOAD="{\"blocks\": ${BLOCKS}}"
 
-          curl -X POST -H 'Content-type: application/json'
+          curl -X POST -H 'Content-type: application/json' \
             -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"

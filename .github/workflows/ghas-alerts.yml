@@ -22,7 +22,7 @@ jobs:
           path: .cache
           key: security-alert-cache
 
-      - name: Fetch all repos in the org (paginated)
+      - name: Fetch all public repos in the org (paginated)
         env:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
@@ -32,7 +32,7 @@ jobs:
           PAGE=1
           while :; do
             PAGE_REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/orgs/${ORG}/repos?per_page=100&page=${PAGE}" \
+              "https://api.github.com/orgs/${ORG}/repos?per_page=100&page=${PAGE}&type=public" \
               | jq -r '.[].name')
             [ -z "$PAGE_REPOS" ] && break
             REPOS="${REPOS} ${PAGE_REPOS}"
@@ -51,7 +51,7 @@ jobs:
             while :; do
               ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
                       -H "Accept: application/vnd.github+json" \
-                      "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100&page=${PAGE}")
+                      "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100&page=${PAGE}&type=public")
               [ "$ALERTS" = "[]" ] && break
               echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' >> .cache/code_ids.txt
               PAGE=$((PAGE + 1))
@@ -70,7 +70,7 @@ jobs:
             while :; do
               ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
                       -H "Accept: application/vnd.github+json" \
-                      "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100&page=${PAGE}")
+                      "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100&page=${PAGE}&type=public")
               [ "$ALERTS" = "[]" ] && break
               echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' >> .cache/secret_ids.txt
               PAGE=$((PAGE + 1))

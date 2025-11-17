@@ -2,7 +2,7 @@ name: New GitHub Advanced Security Alerts to Slack
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # Every 24 hours
+    - cron: "0 0 * * *" # Every 24 hours
   workflow_dispatch:
 
 jobs:
@@ -22,62 +22,113 @@ jobs:
           path: .cache
           key: security-alert-cache
 
-      - name: Fetch all public repos in the org (paginated)
+      #######################################################
+      # Fetch Public Repos (Paginated)
+      #######################################################
+      - name: Fetch list of public repos
         env:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
         run: |
-          echo "Fetching all repos in the org with pagination..."
-          REPOS=""
+          echo "Fetching all PUBLIC repos…"
+          > .cache/repos.txt
           PAGE=1
           while :; do
-            PAGE_REPOS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/orgs/${ORG}/repos?per_page=100&page=${PAGE}&type=public" \
-              | jq -r '.[].name')
-            [ -z "$PAGE_REPOS" ] && break
-            REPOS="${REPOS} ${PAGE_REPOS}"
-            PAGE=$((PAGE + 1))
-          done
-          echo "$REPOS" > .cache/repos.txt
+            RESP=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/orgs/${ORG}/repos?type=public&per_page=100&page=$PAGE")
 
-      - name: Fetch current Code Scanning alerts for all repos
+            COUNT=$(echo "$RESP" | jq 'length')
+            [ "$COUNT" -eq 0 ] && break
+
+            echo "$RESP" | jq -r '.[].name' >> .cache/repos.txt
+            PAGE=$((PAGE+1))
+          done
+
+          echo "Found $(wc -l < .cache/repos.txt) public repos."
+
+      #######################################################
+      # Fetch Code Scanning Alerts (Optimised)
+      #######################################################
+      - name: Fetch current Code Scanning alerts
         env:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
         run: |
           echo "" > .cache/code_ids.txt
+
           while read -r REPO; do
+            # FAST pre-check
+            META=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "Accept: application/vnd.github+json" \
+                      "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=1")
+
+            TOTAL=$(echo "$META" | jq -r 'if type=="array" then length else .total_count // 0 end')
+
+            [ "$TOTAL" == "0" ] && continue
+
+            echo "Repo $REPO has $TOTAL code alerts. Fetching…"
+
             PAGE=1
             while :; do
               ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-                      -H "Accept: application/vnd.github+json" \
-                      "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100&page=${PAGE}&type=public")
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts?state=open&per_page=100&page=$PAGE")
+
               [ "$ALERTS" = "[]" ] && break
-              echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.id) \(.repository.name)" else empty end' >> .cache/code_ids.txt
-              PAGE=$((PAGE + 1))
+
+              echo "$ALERTS" | jq -r '.[] | "\(.id) \(.repository.name)"' \
+                >> .cache/code_ids.txt
+
+              PAGE=$((PAGE+1))
             done
+
           done < .cache/repos.txt
+
           touch .cache/code_ids.txt
 
-      - name: Fetch current Secret Scanning alerts for all repos
+      #######################################################
+      # Fetch Secret Scanning Alerts (Optimised)
+      #######################################################
+      - name: Fetch current Secret Scanning alerts
         env:
           ORG: FrancisCrickInstitute
           GH_TOKEN: ${{ secrets.ghas_token }}
         run: |
           echo "" > .cache/secret_ids.txt
+
           while read -r REPO; do
+            # FAST pre-check
+            META=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "Accept: application/vnd.github+json" \
+                      "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=1")
+
+            TOTAL=$(echo "$META" | jq -r 'if type=="array" then length else .total_count // 0 end')
+
+            [ "$TOTAL" == "0" ] && continue
+
+            echo "Repo $REPO has $TOTAL secret alerts. Fetching…"
+
             PAGE=1
             while :; do
               ALERTS=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-                      -H "Accept: application/vnd.github+json" \
-                      "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100&page=${PAGE}&type=public")
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts?state=open&per_page=100&page=$PAGE")
+
               [ "$ALERTS" = "[]" ] && break
-              echo "$ALERTS" | jq -r 'if type=="array" then .[] | "\(.number) \(.repository.name)" else empty end' >> .cache/secret_ids.txt
-              PAGE=$((PAGE + 1))
+
+              echo "$ALERTS" | jq -r '.[] | "\(.number) \(.repository.name)"' \
+                >> .cache/secret_ids.txt
+
+              PAGE=$((PAGE+1))
             done
+
           done < .cache/repos.txt
+
           touch .cache/secret_ids.txt
 
+      #######################################################
+      # Compare With Previous Run
+      #######################################################
       - name: Compare with previous run
         id: diff
         run: |
@@ -91,9 +142,13 @@ jobs:
 
           CODE_COUNT=$(echo "$NEW_CODE" | grep -c . || echo 0)
           SECRET_COUNT=$(echo "$NEW_SECRET" | grep -c . || echo 0)
-          TOTAL_NEW=$(( CODE_COUNT + SECRET_COUNT ))
+          TOTAL_NEW=$((CODE_COUNT + SECRET_COUNT))
+
           echo "total=$TOTAL_NEW" >> $GITHUB_OUTPUT
 
+      #######################################################
+      # Send Slack Notification
+      #######################################################
       - name: Send new alerts to Slack
         if: steps.diff.outputs.total != '0'
         env:
@@ -104,7 +159,7 @@ jobs:
           build_block () {
             TITLE=$1
             TEXT=$2
-            echo "{\"type\": \"section\", \"text\": {\"type\": \"mrkdwn\", \"text\": \"*${TITLE}*\n${TEXT}\"}}, {\"type\": \"divider\"}"
+            echo "{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"*${TITLE}*\n${TEXT}\"}}, {\"type\":\"divider\"}"
           }
 
           CODE_BLOCKS=""
@@ -113,7 +168,7 @@ jobs:
             ID=$(echo "$LINE" | awk '{print $1}')
             REPO=$(echo "$LINE" | awk '{print $2}')
             ALERT=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-                 "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts/${ID}")
+                        "https://api.github.com/repos/${ORG}/${REPO}/code-scanning/alerts/${ID}")
             RULE=$(echo "$ALERT" | jq -r '.rule.name')
             SEV=$(echo "$ALERT" | jq -r '.rule.severity')
             URL=$(echo "$ALERT" | jq -r '.html_url')
@@ -134,7 +189,7 @@ jobs:
             ID=$(echo "$LINE" | awk '{print $1}')
             REPO=$(echo "$LINE" | awk '{print $2}')
             ALERT=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-                 "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts/${ID}")
+                        "https://api.github.com/repos/${ORG}/${REPO}/secret-scanning/alerts/${ID}")
             TYPE=$(echo "$ALERT" | jq -r '.secret_type_display_name')
             URL=$(echo "$ALERT" | jq -r '.html_url')
             SECRET_BLOCKS="${SECRET_BLOCKS}\n• *${REPO}* — ${TYPE} <${URL}|View>"
@@ -145,13 +200,16 @@ jobs:
           [ -n "$CODE_BLOCKS" ] && BLOCKS_ARRAY+=("$(build_block \"Code Scanning Alerts\" \"$CODE_BLOCKS\")")
           [ -n "$SECRET_BLOCKS" ] && BLOCKS_ARRAY+=("$(build_block \"Secret Scanning Alerts\" \"$SECRET_BLOCKS\")")
 
-          HEADER="{\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"New GitHub Security Alert Detected\"}}"
-          BLOCKS_JSON=$(IFS=, ; echo "${BLOCKS_ARRAY[*]}")
+          HEADER="{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"New GitHub Security Alerts Detected\"}}"
+          BLOCKS_JSON=$(IFS=,; echo "${BLOCKS_ARRAY[*]}")
           PAYLOAD="{\"blocks\": [${HEADER}, ${BLOCKS_JSON}]}"
 
-          curl -X POST -H 'Content-type: application/json' \
-            -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+          curl -X POST -H "Content-type: application/json" \
+               -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"
 
+      #######################################################
+      # Update Cache
+      #######################################################
       - name: Update previous alert cache
         run: |
           cp .cache/code_ids.txt .cache/code_ids_prev.txt

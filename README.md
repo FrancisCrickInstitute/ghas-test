@@ -6,7 +6,7 @@ This repository was created to test Security features offered by GitHub's Advanc
 devtools::install_github(
     "FrancisCrickInstitute/hc",
     ref = "main", 
-    session_token = "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"
+    session_token = ""
 )
 
 Once the installation is complete, run:

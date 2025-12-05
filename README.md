@@ -17,22 +17,13 @@ library(hc)
 hc::run_app()
 
 
-GitHub_Token = "ghp_[0-9a-fA-F]{8,40}"
+# dummy Slack bot token
+SLACK_BOT_TOKEN=xoxb-123456789012-123456789012-ABCDEFGHIJKLMNOpqrstuvwxyz
 
-AWS_Access_Key_ID: "AKIA[0-9A-Z]{16}"
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA0EXAMPLEfakebase64linesnorealkeymaterialHERE
+EXAMPLEfakebase64linesnorealkeymaterialHEREmorefake==
+-----END RSA PRIVATE KEY-----
 
-Slack_bot_token: "xoxb-[0-9]{12,}-[0-9A-Za-z]+"
-
-Google_API_key: "\Iza[0-9A-Za-z-_]{35}"
-
-PEM_key: -----BEGIN (RSA )?PRIVATE KEY-----
-
-const connection = mysql.createConnection({
-  host: 'localhost',
-  user: 'root',
-The hard-coded value "root" is used as 
-.
-CodeQL
-  password: '',
-  database: 'test'
-});
+AWS_ACCESS_KEY_ID=AKIAEXAMPLE012345678
+AWS_SECRET_ACCESS_KEY=0123456789abcdef0123456789abcdef01234567
